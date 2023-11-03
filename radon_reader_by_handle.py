@@ -22,9 +22,10 @@ class ScanDelegate(DefaultDelegate):
 	def handleDiscovery(self, dev, isNewDev, isNewData):
 		pass
 
-def radon_device_finder():
+def radon_device_finder(iface):
 	logger.debug('Scanning for devices')
-	scanner = Scanner().withDelegate(ScanDelegate())
+	scanner = Scanner(iface).withDelegate(ScanDelegate())
+	serial = {'FR:RU', 'FR:RE', 'FR:GI', 'FR:HB', 'FR:HA', 'FR:HC', 'FR:HD', 'FR:RD', 'FR:GL', 'FR:GJ'}
 	try:
 		devices = scanner.scan(10.0)
 		for device in devices:
@@ -34,12 +35,13 @@ def radon_device_finder():
 			elif device.getValueText(8):
 				name = device.getValueText(8)
 			logger.debug('Device name: ' + name)
-			if 'FR:RU' in name:
-				logger.info('Found RD200 - x>=2022 revision with address: ' + device.addr)
-				return device.addr, 1
-			elif 'FR:R2' in name:
-				logger.info('Found RD200 - x<2002 revision with address: ' + device.addr)
-				return device.addr, 0
+			for fr in serial:
+				if fr in name:
+					logger.info('Found RD200 - >=2022 revision with address: ' + device.addr)
+					return device.addr, 1
+				elif 'FR:R2' in name:
+					logger.info('Found RD200 - <2022 revision with address: ' + device.addr)
+					return device.addr, 0
 		logger.info('Finished scanning for devices, no devices found')
 		return "", -1
 	except BTLEException as e:
@@ -58,32 +60,36 @@ class ReadDelegate(btle.DefaultDelegate):
 		logger.debug('Radon Value Raw: {}'.format(data))
 		radonDataRAW=data
 
-def nConnect(per, num_retries, address):
+def nConnect(per, num_retries, address, iface):
+
         try_num = 1
         while (try_num < num_retries):
             try:
-                per._connect(address)
+                per._connect(address, btle.ADDR_TYPE_PUBLIC, iface=iface, timeout=50)
+                logger.debug("Connected in attempt " + str(try_num))
                 return True
-            except BTLEException:
-                logger.debug("Re-trying connections attempts: {}'".format(try_num))
+            except BTLEException as ex:
+                logger.debug("Exception: {}'".format(ex))
+                logger.debug("Re-trying connections, attempts: {}'".format(try_num))
                 try_num += 1
                 sleep(1)
         # if we fell through the while loop, it failed to connect
-        return False 
+        return False
 
-def radon_device_reader(rdDeviceAddress,rdDeviceType):
+def radon_device_reader(rdDeviceAddress, rdDeviceType, iface):
 	if rdDeviceType >= 0:
 		p = btle.Peripheral()
-		nConnect(p, 5, rdDeviceAddress);
+		nConnect(p, 5, rdDeviceAddress, iface);
+		logger.debug('Fetching data...')
 		p.withDelegate(ReadDelegate())
 		#send -- "char-write-cmd 0x002a 50\r" ./temp_expect.sh  (https://community.home-assistant.io/t/radoneye-ble-interface/94962/115)
 
 		if rdDeviceType == 1:
-			#handle: 0x002a, uuid: 00001524-0000-1000-8000-00805f9b34fb 
+			#handle: 0x002a, uuid: 00001524-0000-1000-8000-00805f9b34fb
 			intHandle = int.from_bytes(b'\x00\x2a', "big")
 		elif rdDeviceType == 0:  #old
 			#handle: 0x000b, uuid: 00001524-1212-efde-1523-785feabcd123
-			intHandle = int.from_bytes(b'\x00\x0b', "big") 
+			intHandle = int.from_bytes(b'\x00\x0b', "big")
 
 		bGETValues = b"\x50"
 
@@ -95,6 +101,10 @@ def radon_device_reader(rdDeviceAddress,rdDeviceType):
 
 		if rdDeviceType == 1: #new RD200 sends back short int (2-bytes) with Bq/m^3
 			RadonValueBQ = struct.unpack('<H',radonDataRAW[2:4])[0]
+			Radonvalue1 = struct.unpack('<H',radonDataRAW[4:6])[0]
+			Radonvalue2 = struct.unpack('<H',radonDataRAW[6:8])[0]
+			RadonCvalueNOW = struct.unpack('<H',radonDataRAW[8:10])[0]
+			RadonCvalueLAST = struct.unpack('<H',radonDataRAW[10:12])[0]
 			RadonValuePCi = ( RadonValueBQ / 37 )
 		elif rdDeviceType == 0:  #old RD200 sends back pCi/L as a 4-byte float
 			RadonValuePCi = struct.unpack('<f',radonDataRAW[2:6])[0]
@@ -102,12 +112,11 @@ def radon_device_reader(rdDeviceAddress,rdDeviceType):
 		logger.info('Radon Value Bq/m^3: {}'.format(RadonValueBQ))
 		logger.info('Radon Value pCi/L: {}'.format(RadonValuePCi))
 
-		return RadonValueBQ, RadonValuePCi
+		return RadonValueBQ, RadonValuePCi, Radonvalue1, Radonvalue2, RadonCvalueNOW, RadonCvalueLAST
 
 	elif rdDeviceType == -1:
 		logger.error("Device not found, no data to return.")
 		return  -1,-1
-
 
 #testing w/o radon_reader.py
 
@@ -117,5 +126,3 @@ if ('radon_reader_by_handle' not in sys.modules): #if I was not imported
 
 	mRdDeviceAddress, mRdDeviceType = radon_device_finder() #auto find the device
 	radon_device_reader (mRdDeviceAddress , mRdDeviceType) #get data from the device
-
-
